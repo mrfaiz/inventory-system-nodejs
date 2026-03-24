@@ -7,6 +7,8 @@ const controller = new UiController();
 export const uiRouter = Router();
 
 uiRouter.get('/', controller.dashboard);
+uiRouter.post('/ai-search', controller.aiSearch);
+uiRouter.post('/ai-search.json', controller.aiSearchApi);
 uiRouter.post('/products', controller.createProduct);
 uiRouter.post('/stock', controller.adjustStock);
 uiRouter.post('/orders', controller.placeOrder);

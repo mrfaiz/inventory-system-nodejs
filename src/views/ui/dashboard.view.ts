@@ -1,4 +1,5 @@
 import type { OrderWithItems } from '../../modules/order/order.repository';
+import type { SearchableProduct } from '../../modules/ai-search/ai-search.repository';
 import type { ProductWithInventory } from '../../modules/inventory/inventory.repository';
 
 type DashboardViewModel = {
@@ -7,6 +8,9 @@ type DashboardViewModel = {
   notice?: string;
   error?: string;
   orderDraft?: string;
+  searchPrompt?: string;
+  searchAnswer?: string;
+  searchProducts?: SearchableProduct[];
 };
 
 function escapeHtml(value: string): string {
@@ -24,6 +28,9 @@ export function renderDashboard({
   notice,
   error,
   orderDraft = '',
+  searchPrompt = '',
+  searchAnswer,
+  searchProducts = [],
 }: DashboardViewModel): string {
   const productCards = products
     .map(
@@ -84,6 +91,24 @@ export function renderDashboard({
                 `,
               )
               .join('')}
+          </div>
+        </article>
+      `,
+    )
+    .join('');
+
+  const searchResultCards = searchProducts
+    .map(
+      (product) => `
+        <article class="chat-result">
+          <div class="chat-result__head">
+            <strong>${escapeHtml(product.name)}</strong>
+            <span class="pill">${product.inventory?.quantity ?? 0} in stock</span>
+          </div>
+          <p class="muted">${escapeHtml(product.description ?? 'No description')}</p>
+          <div class="chat-result__meta">
+            <span>${escapeHtml(product.sku)}</span>
+            <span>$${(product.priceCents / 100).toFixed(2)}</span>
           </div>
         </article>
       `,
@@ -177,6 +202,13 @@ export function renderDashboard({
           margin: 0 0 14px;
           font-size: 1.35rem;
         }
+        .section-kicker {
+          margin: 0 0 8px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          font-size: 0.75rem;
+        }
         .forms {
           display: grid;
           gap: 16px;
@@ -214,6 +246,59 @@ export function renderDashboard({
           color: white;
           cursor: pointer;
           justify-self: start;
+        }
+        button[disabled] {
+          opacity: 0.7;
+          cursor: wait;
+        }
+        .chat-window {
+          display: grid;
+          gap: 14px;
+        }
+        .chat-bubble {
+          padding: 14px 16px;
+          border-radius: 18px;
+          max-width: 92%;
+          line-height: 1.5;
+        }
+        .chat-bubble--user {
+          justify-self: end;
+          background: linear-gradient(135deg, #201a14, #3d2e1b);
+          color: #fff8ef;
+        }
+        .chat-bubble--assistant {
+          justify-self: start;
+          background: rgba(15, 118, 110, 0.08);
+          border: 1px solid rgba(15, 118, 110, 0.14);
+        }
+        .chat-bubble--error {
+          background: rgba(180, 35, 24, 0.08);
+          border: 1px solid rgba(180, 35, 24, 0.16);
+          color: var(--danger);
+        }
+        .chat-results {
+          display: grid;
+          gap: 10px;
+        }
+        .chat-result {
+          border: 1px solid rgba(32, 26, 20, 0.08);
+          border-radius: 18px;
+          padding: 14px;
+          background: rgba(255,255,255,0.6);
+        }
+        .chat-result__head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+        .chat-result__meta {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          color: var(--muted);
+          font-size: 0.9rem;
         }
         .hint, .muted {
           color: var(--muted);
@@ -296,6 +381,34 @@ export function renderDashboard({
         <section class="grid">
           <div class="stack">
             <article class="card">
+              <p class="section-kicker">AI Search</p>
+              <h2>Product Chat</h2>
+              <div class="chat-window">
+                <form id="ai-search-form" method="post" action="/ui/ai-search">
+                  <label>Ask about products<textarea id="ai-search-prompt" name="prompt" required placeholder="Find wireless keyboards under $150 with stock available">${escapeHtml(searchPrompt)}</textarea></label>
+                  <p class="hint">This uses Mistral plus the local product catalog search tool.</p>
+                  <button id="ai-search-submit" type="submit">Search Products</button>
+                </form>
+                <div id="ai-search-thread">
+                  ${
+                    searchPrompt
+                      ? `
+                    <div class="chat-bubble chat-bubble--user">${escapeHtml(searchPrompt)}</div>
+                    ${
+                      searchAnswer
+                        ? `<div class="chat-bubble chat-bubble--assistant">${escapeHtml(searchAnswer)}</div>`
+                        : '<div class="chat-bubble chat-bubble--assistant">No answer returned.</div>'
+                    }
+                    <div class="chat-results">
+                      ${searchResultCards || '<p class="muted">No product matches returned.</p>'}
+                    </div>
+                  `
+                      : '<p class="muted">Run a natural-language product search to see AI results here.</p>'
+                  }
+                </div>
+              </div>
+            </article>
+            <article class="card">
               <h2>Write Operations</h2>
               <div class="forms">
                 <form method="post" action="/ui/products">
@@ -346,6 +459,98 @@ export function renderDashboard({
           </div>
         </section>
       </main>
+      <script>
+        (() => {
+          const form = document.getElementById('ai-search-form');
+          const promptInput = document.getElementById('ai-search-prompt');
+          const submitButton = document.getElementById('ai-search-submit');
+          const thread = document.getElementById('ai-search-thread');
+
+          if (!form || !promptInput || !submitButton || !thread) {
+            return;
+          }
+
+          const escapeHtml = (value) =>
+            value
+              .replaceAll('&', '&amp;')
+              .replaceAll('<', '&lt;')
+              .replaceAll('>', '&gt;')
+              .replaceAll('"', '&quot;')
+              .replaceAll("'", '&#39;');
+
+          const renderProducts = (products) => {
+            if (!products.length) {
+              return '<p class="muted">No product matches returned.</p>';
+            }
+
+            return products
+              .map(
+                (product) => \`
+                  <article class="chat-result">
+                    <div class="chat-result__head">
+                      <strong>\${escapeHtml(product.name)}</strong>
+                      <span class="pill">\${product.stock} in stock</span>
+                    </div>
+                    <p class="muted">\${escapeHtml(product.description || 'No description')}</p>
+                    <div class="chat-result__meta">
+                      <span>\${escapeHtml(product.sku)}</span>
+                      <span>$\${(product.priceCents / 100).toFixed(2)}</span>
+                    </div>
+                  </article>
+                \`,
+              )
+              .join('');
+          };
+
+          form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+
+            const prompt = promptInput.value.trim();
+
+            if (!prompt) {
+              return;
+            }
+
+            submitButton.disabled = true;
+            submitButton.textContent = 'Searching...';
+            thread.innerHTML = \`
+              <div class="chat-bubble chat-bubble--user">\${escapeHtml(prompt)}</div>
+              <div class="chat-bubble chat-bubble--assistant">Searching products...</div>
+            \`;
+
+            try {
+              const response = await fetch('/ui/ai-search.json', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Accept: 'application/json',
+                },
+                body: JSON.stringify({ prompt }),
+              });
+
+              const payload = await response.json();
+
+              if (!response.ok) {
+                throw new Error(typeof payload.error === 'string' ? payload.error : 'Unable to run AI search');
+              }
+
+              thread.innerHTML = \`
+                <div class="chat-bubble chat-bubble--user">\${escapeHtml(payload.prompt)}</div>
+                <div class="chat-bubble chat-bubble--assistant">\${escapeHtml(payload.answer || 'No answer returned.')}</div>
+                <div class="chat-results">\${renderProducts(Array.isArray(payload.products) ? payload.products : [])}</div>
+              \`;
+            } catch (error) {
+              thread.innerHTML = \`
+                <div class="chat-bubble chat-bubble--user">\${escapeHtml(prompt)}</div>
+                <div class="chat-bubble chat-bubble--assistant chat-bubble--error">\${escapeHtml(error instanceof Error ? error.message : 'Unable to run AI search')}</div>
+              \`;
+            } finally {
+              submitButton.disabled = false;
+              submitButton.textContent = 'Search Products';
+            }
+          });
+        })();
+      </script>
     </body>
   </html>`;
 }

@@ -7,6 +7,7 @@ This project includes:
 - Prisma schema and SQL migration
 - transactional order placement and cancellation
 - idempotent order and cancel flows
+- Mistral-powered AI product search with tool calling
 - unit tests and Docker-backed integration tests via Testcontainers
 - a small server-rendered UI for manual testing
 
@@ -53,6 +54,13 @@ src/
     root-router.ts
     trpc.ts
   modules/
+    ai-search/
+      ai-search.schema.ts
+      ai-search.repository.ts
+      mistral.client.ts
+      ai-search.service.ts
+      ai-search.controller.ts
+      ai-search.router.ts
     inventory/
       inventory.schema.ts
       inventory.repository.ts
@@ -172,6 +180,36 @@ Client
 
 tRPC is configured under [src/trpc](./src/trpc).
 
+### AI Search Overview
+
+The `ai-search` module adds a natural-language product search flow on top of the existing inventory catalog.
+
+It uses Mistral Chat Completions with tool calling in a controlled loop:
+
+1. the user sends a natural-language prompt such as "find wireless keyboards in stock"
+2. Mistral decides whether to call the local `search_products` tool
+3. the backend executes that tool against the PostgreSQL product catalog
+4. the tool result is sent back to Mistral
+5. Mistral returns a final answer summarizing the matching products
+
+The current tool set includes:
+
+- `search_products`
+  - searches `Product.sku`, `Product.name`, and `Product.description`
+  - returns matching products with inventory quantities
+
+Example UI:
+
+![AI Search Example](./ai-search.png)
+
+The implementation is split across:
+
+- [src/modules/ai-search/ai-search.router.ts](./src/modules/ai-search/ai-search.router.ts)
+- [src/modules/ai-search/ai-search.controller.ts](./src/modules/ai-search/ai-search.controller.ts)
+- [src/modules/ai-search/ai-search.service.ts](./src/modules/ai-search/ai-search.service.ts)
+- [src/modules/ai-search/ai-search.repository.ts](./src/modules/ai-search/ai-search.repository.ts)
+- [src/modules/ai-search/mistral.client.ts](./src/modules/ai-search/mistral.client.ts)
+
 ### Routers
 
 - `inventory.*`
@@ -179,6 +217,8 @@ tRPC is configured under [src/trpc](./src/trpc).
   - get product by ID
   - create product
   - adjust stock
+- `aiSearch.*`
+  - `searchProducts`: Mistral-backed natural language product search using tool calling
 - `order.*`
   - list orders
   - get order by ID
@@ -199,10 +239,19 @@ The routers exposed by this project are:
 - `inventory.getById`
 - `inventory.create`
 - `inventory.adjustStock`
+- `aiSearch.searchProducts`
 - `order.list`
 - `order.getById`
 - `order.place`
 - `order.cancel`
+
+Search products with AI:
+
+```json
+{
+  "prompt": "Find keyboards that are in stock"
+}
+```
 
 Create product:
 
@@ -248,6 +297,28 @@ Cancel order:
 }
 ```
 
+### AI Search response shape
+
+`aiSearch.searchProducts` returns:
+
+```json
+{
+  "answer": "I found Keyboard (SKU-1), priced at 8900 cents with 5 units in stock.",
+  "products": [
+    {
+      "id": "9b7cfa2c-e5ef-4db2-9d76-a17d2cc4190c",
+      "sku": "SKU-1",
+      "name": "Keyboard",
+      "description": "Mechanical keyboard",
+      "priceCents": 8900,
+      "inventory": {
+        "quantity": 5
+      }
+    }
+  ]
+}
+```
+
 ## Manual UI
 
 The project includes a small server-rendered UI for manual testing.
@@ -255,6 +326,8 @@ The project includes a small server-rendered UI for manual testing.
 ### UI routes
 
 - `GET /ui`
+- `POST /ui/ai-search`
+- `POST /ui/ai-search.json`
 - `POST /ui/products`
 - `POST /ui/stock`
 - `POST /ui/orders`
@@ -262,6 +335,7 @@ The project includes a small server-rendered UI for manual testing.
 
 ### UI responsibilities
 
+- run AJAX-based AI product searches from the dashboard
 - create products
 - adjust stock
 - place orders with idempotency keys
@@ -275,10 +349,39 @@ The UI controller lives in [src/modules/ui/ui.controller.ts](./src/modules/ui/ui
 After seeding and starting the app, the `/ui` page gives you one place to exercise the main flows:
 
 1. create a product
-2. adjust stock with a positive or negative delta
-3. place an order with an idempotency key
-4. cancel an order with a cancel idempotency key
-5. inspect products and orders on the same page
+2. use the Product Chat panel to search products with natural language
+3. adjust stock with a positive or negative delta
+4. place an order with an idempotency key
+5. cancel an order with a cancel idempotency key
+6. inspect products and orders on the same page
+
+### AJAX product chat
+
+The `/ui` dashboard includes a Product Chat panel.
+
+- the page stays server-rendered overall
+- the AI chat form submits with `fetch(...)` to `POST /ui/ai-search.json`
+- the response is rendered inline without a full page refresh
+- the fallback `POST /ui/ai-search` route still exists for non-JavaScript form submission
+
+The JSON endpoint returns:
+
+```json
+{
+  "prompt": "Find keyboards in stock",
+  "answer": "I found Keyboard (SKU-1), priced at 8900 cents with 5 units in stock.",
+  "products": [
+    {
+      "id": "9b7cfa2c-e5ef-4db2-9d76-a17d2cc4190c",
+      "sku": "SKU-1",
+      "name": "Keyboard",
+      "description": "Mechanical keyboard",
+      "priceCents": 8900,
+      "stock": 5
+    }
+  ]
+}
+```
 
 Recommended manual checks:
 
@@ -303,7 +406,15 @@ Current local database URL:
 ```env
 DATABASE_URL="postgresql://inventory:inventory@localhost:5434/inventory_system?schema=public"
 PORT=3000
+MISTRAL_API_KEY="your-mistral-api-key"
+MISTRAL_MODEL="mistral-small-latest"
 ```
+
+AI search environment variables:
+
+- `MISTRAL_API_KEY`: required for the `aiSearch` module and `/ui` Product Chat
+- `MISTRAL_MODEL`: optional, defaults to `mistral-small-latest`
+- `MISTRAL_BASE_URL`: optional override for the Mistral API base URL
 
 ### Install dependencies
 
@@ -405,5 +516,5 @@ npx prisma migrate deploy
 
 - Docker Compose is used for the normal local development database
 - Testcontainers is used for integration testing
-- The project currently uses server-rendered HTML for manual UI testing instead of a separate frontend app
+- The project uses server-rendered HTML for manual UI testing, with a small AJAX enhancement for Product Chat
 - The inventory/order modules are the main domain slices today, but the structure is ready to grow with more modules

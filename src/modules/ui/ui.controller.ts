@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 
+import { AiSearchService } from '../ai-search/ai-search.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { OrderService } from '../order/order.service';
 import { renderDashboard } from '../../views/ui/dashboard.view';
@@ -33,11 +34,22 @@ function parseOrderItems(input: string) {
 
 export class UiController {
   constructor(
+    private readonly aiSearchService = new AiSearchService(),
     private readonly inventoryService = new InventoryService(),
     private readonly orderService = new OrderService(),
   ) {}
 
-  dashboard = async (req: Request, res: Response) => {
+  private async renderDashboardResponse(
+    res: Response,
+    options: {
+      notice?: string;
+      error?: string;
+      orderDraft?: string;
+      searchPrompt?: string;
+      searchAnswer?: string;
+      searchProducts?: Awaited<ReturnType<InventoryService['listProducts']>>;
+    } = {},
+  ) {
     const [products, orders] = await Promise.all([
       this.inventoryService.listProducts(),
       this.orderService.listOrders(),
@@ -47,11 +59,67 @@ export class UiController {
       renderDashboard({
         products,
         orders,
-        notice: typeof req.query.notice === 'string' ? req.query.notice : undefined,
-        error: typeof req.query.error === 'string' ? req.query.error : undefined,
-        orderDraft: typeof req.query.orderDraft === 'string' ? req.query.orderDraft : '',
+        notice: options.notice,
+        error: options.error,
+        orderDraft: options.orderDraft ?? '',
+        searchPrompt: options.searchPrompt ?? '',
+        searchAnswer: options.searchAnswer,
+        searchProducts: options.searchProducts ?? [],
       }),
     );
+  }
+
+  dashboard = async (req: Request, res: Response) => {
+    await this.renderDashboardResponse(res, {
+      notice: typeof req.query.notice === 'string' ? req.query.notice : undefined,
+      error: typeof req.query.error === 'string' ? req.query.error : undefined,
+      orderDraft: typeof req.query.orderDraft === 'string' ? req.query.orderDraft : '',
+    });
+  };
+
+  aiSearch = async (req: Request, res: Response) => {
+    const prompt = String(req.body.prompt ?? '');
+
+    try {
+      const result = await this.aiSearchService.searchProducts({ prompt });
+
+      await this.renderDashboardResponse(res, {
+        notice: 'AI search completed',
+        searchPrompt: prompt,
+        searchAnswer: result.answer,
+        searchProducts: result.products,
+      });
+    } catch (error) {
+      await this.renderDashboardResponse(res, {
+        error: asMessage(error instanceof Error ? error.message : error, 'Unable to run AI search'),
+        searchPrompt: prompt,
+      });
+    }
+  };
+
+  aiSearchApi = async (req: Request, res: Response) => {
+    const prompt = String(req.body.prompt ?? '');
+
+    try {
+      const result = await this.aiSearchService.searchProducts({ prompt });
+
+      res.status(200).json({
+        prompt,
+        answer: result.answer,
+        products: result.products.map((product) => ({
+          id: product.id,
+          sku: product.sku,
+          name: product.name,
+          description: product.description,
+          priceCents: product.priceCents,
+          stock: product.inventory?.quantity ?? 0,
+        })),
+      });
+    } catch (error) {
+      res.status(400).json({
+        error: asMessage(error instanceof Error ? error.message : error, 'Unable to run AI search'),
+      });
+    }
   };
 
   createProduct = async (req: Request, res: Response) => {
